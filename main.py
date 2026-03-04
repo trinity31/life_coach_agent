@@ -1,10 +1,14 @@
 import dotenv
 
 dotenv.load_dotenv()
-import time
+from openai import OpenAI
 import asyncio
 import streamlit as st
-from agents import Agent, Runner, SQLiteSession, WebSearchTool
+from agents import Agent, Runner, SQLiteSession, WebSearchTool, FileSearchTool
+
+client = OpenAI()
+
+VECTOR_STORE_ID = "vs_69a8328e2e4481918d94e5d6cd50aca6"
 
 if "agent" not in st.session_state:
     st.session_state["agent"] = Agent(
@@ -14,9 +18,14 @@ if "agent" not in st.session_state:
 
         You have access to the followign tools:
             - Web Search Tool: Use this when users seek motivation, self-development tips, or advice on forming habits, or user asks a questions that isn't in your training data. Use this tool when the users asks about current or future events, when you think you don't know the answer, try searching for it in the web first.
+            - File Search Tool: Use this tool to search for the user's personal goals and time management strategies, and please provide advices based on the uploaded user's goals.
         """,
         tools=[
             WebSearchTool(),
+            FileSearchTool(
+                vector_store_ids=[VECTOR_STORE_ID],
+                max_num_results=3,
+            ),
         ],
     )
 agent = st.session_state["agent"]
@@ -40,10 +49,15 @@ async def paint_history():
                 else:
                     if message["type"] == "message":
                         st.write(message["content"][0]["text"])
-        if "type" in message and message["type"] == "web_search_call":
-            with st.chat_message("ai"):
-                st.write("🔍 Searched the web...")
+        if "type" in message:
+            if message["type"] == "web_search_call":
+                with st.chat_message("ai"):
+                    st.write("🔍 Searched the web...")
+            elif message["type"] == "file_search_call":
+                with st.chat_message("ai"):
+                    st.write("🗂️ Searched your files...")
 
+asyncio.run(paint_history())
 
 def update_status(status_container, event):
 
@@ -57,15 +71,24 @@ def update_status(status_container, event):
             "🔍 Web search in progress...",
             "running",
         ),
+        "response.file_search_call.completed": (
+            "✅ File search completed.",
+            "complete",
+        ),
+        "response.file_search_call.in_progress": (
+            "🗂️ Starting file search...",
+            "running",
+        ),
+        "response.file_search_call.searching": (
+            "🗂️ File search in progress...",
+            "running",
+        ),
         "response.completed": (" ", "complete"),
     }
 
     if event in status_messages:
         label, state = status_messages[event]
         status_container.update(label=label, state=state)
-
-
-asyncio.run(paint_history())
 
 
 async def run_agent(message):
@@ -90,12 +113,32 @@ async def run_agent(message):
                     text_placeholder.write(response)
 
 
-prompt = st.chat_input("Write a message for your assistant")
+prompt = st.chat_input(
+    "Write a message for your assistant",
+    accept_file=True,
+    file_type=["txt"],
+)
 
 if prompt:
-    with st.chat_message("human"):
-        st.write(prompt)
-    asyncio.run(run_agent(prompt))
+    for file in prompt.files:
+        if file.type.startswith("text/"):
+            with st.chat_message("ai"):
+                with st.status("⏳ Uploading file...") as status:
+                    uploaded_file = client.files.create(
+                        file=(file.name, file.getvalue()),
+                        purpose="user_data",
+                    )
+                    status.update(label="⏳ Attaching file...")
+                    client.vector_stores.files.create(
+                        vector_store_id=VECTOR_STORE_ID,
+                        file_id=uploaded_file.id,
+                    )
+                    status.update(label="✅ File uploaded", state="complete")
+
+    if prompt.text:
+        with st.chat_message("human"):
+            st.write(prompt.text)
+        asyncio.run(run_agent(prompt.text))
 
 
 with st.sidebar:
